@@ -50,3 +50,45 @@ stat -c '%s' evidence.bin
 ```
 The reported byte size, MD5, and SHA-256 should match the inspector output for the
 same file.
+
+## Evidence manifest
+
+The manifest records a read-only inspection in a structured evidence record:
+
+* Case ID and evidence ID
+* Original filename
+* Byte size, MD5, and SHA-256 from the inspector
+* Inspection timestamp in UTC ISO 8601
+* Optional acquisition metadata when known
+* Verification status
+
+```python
+from ghosttrace import (
+    create_evidence_record,
+    inspect_forensic_image,
+    verify_against_record,
+)
+
+inspection = inspect_forensic_image("evidence.bin")
+record = create_evidence_record(
+    inspection,
+    case_id="CASE-1",
+    evidence_id="EV-1",
+    acquired_by="analyst@example.local",
+)
+print(record.to_json(indent=2))
+
+re_inspection = inspect_forensic_image("evidence.bin")
+verified = verify_against_record(record, re_inspection)
+print(verified.verification_status)
+```
+
+Important limitations:
+
+* The inspection timestamp is when GhostTrace inspected the file, not when it was
+  acquired. If acquisition time is unknown, it remains unknown.
+* Unknown optional fields are stored as JSON `null`, not guessed or inferred.
+* A hash match means the current file bytes match the recorded bytes. It does not
+  prove authenticity, authorship, acquisition time, or chain of custody.
+* MD5 is included for legacy compatibility only.
+* JSON manifests are not tamper-evident.
