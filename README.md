@@ -167,6 +167,42 @@ Not every constant in this feature rests on the same quality of evidence:
   the paper or against real device output.
 
 GhostTrace scans from offset `0` rather than seeking to `0x200`. That is a deliberate
-choice: on a partitioned disk the master sector sits at `partition_base + 0x200`, so a
-fixed `0x200` read would miss it, while a whole-window scan finds it wherever it lands.
-The trade-off is a wider false-positive surface, described above.
+choice: whether the documented `0x200` is measured from the start of the disk image or
+from the start of a partition has **not** been established (see the offset-semantics
+section below), so a fixed `0x200` read could miss the record on some layouts, while a
+whole-window scan finds it wherever it lands. The trade-off is a wider false-positive
+surface, described above.
+
+### Offset fields are raw values, not absolute file offsets
+
+Several decoded fields *look* like file offsets — `system_logs_offset`, `video_data_offset`,
+`hikbtree1_offset`, and `hikbtree2_offset` — and a reader could reasonably assume they can
+be used directly with `seek()` on the image. They cannot, and GhostTrace does not treat
+them that way.
+
+What GhostTrace actually does (confirmed against the source, not just intended):
+
+* Each field is decoded verbatim from its fixed position in the 256-byte record with
+  `struct.unpack_from`. The bytes at, say, record offset `0x50` become the integer
+  `system_logs_offset`, unchanged.
+* GhostTrace performs **no rebasing**. It does not add a partition base, a partition
+  offset, or any other value to these numbers, and it does not otherwise reinterpret
+  them. Whatever integer the record stores is what you get.
+* Consequently these values are **not** known to be absolute offsets into the image file.
+  Their coordinate system — partition-relative, disk-relative, or something else — has
+  **not** been independently verified against authentic device evidence.
+
+Only one offset in the result is a true absolute file offset: `signature_offset`, which is
+where GhostTrace actually found the signature while scanning the file.
+
+The community reference parser rebases these same pointers before using them: it detects a
+partition offset from the MBR and adds it to the stored values before reading from them.
+That is evidence about how one implementation interprets the format; it is **not**
+independent proof of the format's semantics. A second implementation agreeing with the
+first does not constitute device-verified ground truth, and GhostTrace has not confirmed
+the reference parser's interpretation against a real image.
+
+Practical guidance: treat these four fields as opaque metadata reported for completeness.
+Do not use them to locate data in the image until their coordinate system has been
+verified against an authentic disk with independently known expected values. When you do
+need an absolute location you can rely on today, use `signature_offset`.
