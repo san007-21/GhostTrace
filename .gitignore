@@ -152,12 +152,16 @@ activemq-data/
 # Environments
 .env
 .envrc
+.venv/
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# GhostTrace tooling
+.freebuff/
 
 # Spyder project settings
 .spyderproject
