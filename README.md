@@ -92,3 +92,37 @@ Important limitations:
   prove authenticity, authorship, acquisition time, or chain of custody.
 * MD5 is included for legacy compatibility only.
 * JSON manifests are not tamper-evident.
+
+## Hikvision Master Sector detection
+
+This feature performs one narrow job: it scans a regular file, read-only and in bounded
+chunks, for the exact reference signature `HIKVISION@HANGZHOU`, reports the absolute byte
+offset of its first occurrence within the search window (default 50 MiB), and — when the
+full 256-byte record is present — decodes a small set of documented little-endian fields.
+
+```python
+from ghosttrace import detect_master_sector
+
+result = detect_master_sector("evidence.dd")
+if result is not None:
+    print(result.signature_offset)
+    print(result.hdd_capacity)
+    print(result.initialization_time)
+```
+
+What it does **not** do:
+
+* It does not parse HIKBTREE structures, extract video, recover deleted files, detect
+  anti-forensics, read E01 images, or support any other vendor format.
+* It applies no validity rules beyond two checks: the exact signature is present, and the
+  full 256-byte record is readable. A field value of zero is reported as zero and is never
+  interpreted as "missing", "disabled", or "invalid".
+* If the signature occurs but fewer than 256 record bytes remain, GhostTrace raises
+  `MasterSectorTruncatedError` rather than decode a partial record.
+* If no signature occurs within the search window, it returns `None`; it does not guess at
+  alternate on-disk formats.
+
+The tests for this feature use synthetic fixtures constructed in the test suite. Passing
+synthetic tests **does not** establish compatibility with any real DVR or NVR firmware,
+disk layout, or evidence image. Field offsets were transcribed from a reference parser and
+have not been validated against real device output.
