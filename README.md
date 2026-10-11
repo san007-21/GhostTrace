@@ -126,3 +126,47 @@ The tests for this feature use synthetic fixtures constructed in the test suite.
 synthetic tests **does not** establish compatibility with any real DVR or NVR firmware,
 disk layout, or evidence image. Field offsets were transcribed from a reference parser and
 have not been validated against real device output.
+
+### Detection is not validation or authentication
+
+`detect_master_sector` answers exactly one question: *does the exact 18-byte signature
+`HIKVISION@HANGZHOU` occur within the search window, and are the 256 bytes that follow it
+readable?* A returned candidate proves only that. It does **not** prove the record is
+authentic, untampered, or consistent with any device's configuration.
+
+Concretely:
+
+* **A candidate can be a false positive.** Any file that happens to contain the signature
+  plus 256 readable bytes — a random blob, an unrelated image, planted bytes — yields a
+  candidate. The test suite includes such a case deliberately to document this surface.
+* **First occurrence wins.** If the signature appears more than once in the window, the
+  lowest-offset occurrence is reported. GhostTrace does not arbitrate between duplicates
+  and does not check the documented backup copy.
+* **No plausibility heuristics.** Field values are returned verbatim. Values that many
+  vendor parsers would reject — a capacity that is not a sector multiple, a zero block
+  size, sentinel timestamps such as `0x7FFFFFFF`, or `0xFFFFFFFFFFFFFFFF` in an offset —
+  are reported unchanged. GhostTrace infers no undocumented validity rules from field
+  values, including zeros.
+* **Real-image compatibility is unverified.** No authentic Hikvision image with
+  independently known expected values has been run against this detector. Treat every
+  result as a candidate for manual confirmation, not as an authenticated finding.
+
+### Provenance of the format constants
+
+Not every constant in this feature rests on the same quality of evidence:
+
+* **Primary-source supported** — reported by the 2015 research paper *Analysis of the
+  HIKVISION DVR File System* (Han, Jeong & Lee, Springer LNCS 157): the ASCII signature
+  `HIKVISION@HANGZHOU`, the 256-byte master-sector size, the documented master-sector
+  area start at offset `0x200`, and little-endian field encoding. (These were verified via
+  indexed excerpts of the paper; the full text was not retrieved during development.)
+* **Reference implementation only** — the eleven per-field offsets and widths
+  (`0x38`, `0x50`, `0x58`, `0x68`, `0x78`, `0x80`, `0x88`, `0x90`, `0x98`, `0xA0`, `0xE0`)
+  come solely from the community reference parser, whose own comments describe them as
+  "based on empirical analysis." They have **not** been independently confirmed against
+  the paper or against real device output.
+
+GhostTrace scans from offset `0` rather than seeking to `0x200`. That is a deliberate
+choice: on a partitioned disk the master sector sits at `partition_base + 0x200`, so a
+fixed `0x200` read would miss it, while a whole-window scan finds it wherever it lands.
+The trade-off is a wider false-positive surface, described above.

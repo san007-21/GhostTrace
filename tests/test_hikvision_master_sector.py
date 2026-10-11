@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import struct
 from pathlib import Path
 
@@ -221,3 +222,165 @@ def test_source_file_is_not_mutated(tmp_path: Path) -> None:
     inspection = inspect_forensic_image(target)
     assert inspection.byte_size == len(before)
     assert inspection.sha256 == hashlib.sha256(before).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Feature 004: location, multiplicity, verbatim passthrough, and the
+# detection-vs-validation boundary.
+#
+# None of the tests below authenticate a record. They confirm what the detector
+# DOES (find an exact byte signature at a reported offset and decode the bytes
+# that follow it) and, just as importantly, what it does NOT establish
+# (that the candidate is a genuine, untampered, firmware-consistent Master
+# Sector). See the README provenance notes.
+# ---------------------------------------------------------------------------
+
+
+def test_signature_at_documented_0x200_location(tmp_path: Path) -> None:
+    # Primary research (Han et al. 2015) states the master-sector AREA begins at
+    # offset 0x200. GhostTrace does NOT assume a fixed location -- it scans from
+    # offset zero -- so this test only confirms the reported offset is exact when
+    # a record happens to sit at the documented 0x200 location.
+    prefix = 0x200
+    target = _write_image(tmp_path, b"\x00" * prefix + _build_record(), name="at-200.dd")
+    result = detect_master_sector(target)
+    assert result is not None
+    assert result.signature_offset == prefix
+    assert result.signature == MASTER_SECTOR_SIGNATURE
+    assert result.hdd_capacity == HDD_CAPACITY
+
+
+def test_signature_at_0x200_crossing_a_small_chunk_boundary(tmp_path: Path) -> None:
+    # Same documented location, but with a small chunk so the scan must stitch
+    # slices together. The reported offset must still be exactly 0x200.
+    prefix = 0x200
+    target = _write_image(tmp_path, b"\x00" * prefix + _build_record(), name="at-200-small.dd")
+    result = detect_master_sector(target, chunk_size=64)
+    assert result is not None
+    assert result.signature_offset == prefix
+
+
+def test_multiple_signature_occurrences_returns_first(tmp_path: Path) -> None:
+    # Two complete records at different offsets with distinguishable payloads.
+    # Documented behaviour: the FIRST (lowest-offset) occurrence in the window wins.
+    first_offset = 0x100
+    second_offset = 0x800
+    first_record = _build_record(hdd_capacity=0x1111111111111111)
+    second_record = _build_record(hdd_capacity=0x2222222222222222)
+    body = b"\x00" * first_offset + first_record
+    body += b"\x00" * (second_offset - len(body)) + second_record
+    target = _write_image(tmp_path, body, name="two-records.dd")
+
+    result = detect_master_sector(target)
+    assert result is not None
+    assert result.signature_offset == first_offset
+    assert result.hdd_capacity == 0x1111111111111111
+
+    # Same answer regardless of scan parameters (determinism of first-wins).
+    for chunk in (32, 256, 4096):
+        again = detect_master_sector(target, chunk_size=chunk)
+        assert again is not None
+        assert again.signature_offset == first_offset
+        assert again.hdd_capacity == 0x1111111111111111
+
+
+def test_multiple_occurrences_within_one_chunk(tmp_path: Path) -> None:
+    # Two records inside a single 1 KiB slice: first-wins must not be affected by
+    # how many occurrences a single slice contains.
+    body = _build_record(hdd_capacity=0xAAAA) + (b"\x00" * 64) + _build_record(hdd_capacity=0xBBBB)
+    target = _write_image(tmp_path, body, name="adjacent-records.dd")
+    result = detect_master_sector(target, chunk_size=1024)
+    assert result is not None
+    assert result.signature_offset == 0
+    assert result.hdd_capacity == 0xAAAA
+
+
+def test_unusual_field_values_are_returned_verbatim(tmp_path: Path) -> None:
+    # Sentinel-like and implausible values must pass through unchanged. GhostTrace
+    # deliberately applies NO plausibility heuristics (no capacity alignment checks,
+    # no timestamp-range checks, no offset-monotonicity checks). These values echo
+    # patterns the reference parser uses elsewhere (0x7FFFFFFF = "not yet full",
+    # 0xFFFFFFFFFFFFFFFF = -1 / invalid offset); none of them may cause rejection.
+    extreme = {
+        "hdd_capacity": 0xFFFFFFFFFFFFFFFF,
+        "system_logs_offset": 0xFFFFFFFFFFFFFFFF,
+        "system_logs_size": 0,
+        "video_data_offset": 0x7FFFFFFFFFFFFFFF,
+        "data_block_size": 0,
+        "total_data_blocks": 0,
+        "hikbtree1_offset": 0xFFFFFFFFFFFFFFFF,
+        "hikbtree1_size": 0,
+        "hikbtree2_offset": 0,
+        "hikbtree2_size": 0xFFFFFFFFFFFFFFFF,
+        "initialization_time": 0xFFFFFFFF,
+    }
+    target = _write_image(tmp_path, _build_record(**extreme), name="extreme.dd")
+    result = detect_master_sector(target)
+    assert result is not None
+    for field, expected in extreme.items():
+        assert getattr(result, field) == expected, field
+
+
+def test_unaligned_capacity_and_zero_block_geometry_pass_through(tmp_path: Path) -> None:
+    # A capacity that is not a 512-multiple and a zero data-block size would be
+    # "invalid" under many vendor parsers. GhostTrace has no such rule and returns
+    # them verbatim.
+    record = _build_record(hdd_capacity=12345, data_block_size=0, total_data_blocks=0)
+    target = _write_image(tmp_path, record, name="unaligned.dd")
+    result = detect_master_sector(target)
+    assert result is not None
+    assert result.hdd_capacity == 12345
+    assert result.data_block_size == 0
+    assert result.total_data_blocks == 0
+
+
+def test_nonstructured_random_file_with_signature_returns_candidate(tmp_path: Path) -> None:
+    # A random, non-structured blob that merely CONTAINS the signature plus enough
+    # trailing bytes for a full 256-byte record. The detector returns a candidate
+    # because detection is a byte-pattern match, not an authenticity check. This test
+    # pins that behaviour and demonstrates the false-positive surface: a candidate here
+    # is NOT authenticated and NOT structurally validated.
+    rng = random.Random(20261011)
+    prefix_offset = 0x180
+    filler = bytearray(rng.randbytes(prefix_offset))
+    # Ensure the random prefix does not itself contain the signature, so the reported
+    # offset is unambiguous.
+    assert MASTER_SECTOR_SIGNATURE not in bytes(filler)
+
+    body = bytes(filler) + _build_record()
+    target = _write_image(tmp_path, body, name="random.dd")
+    result = detect_master_sector(target)
+    assert result is not None
+    assert result.signature_offset == prefix_offset
+    assert result.signature == MASTER_SECTOR_SIGNATURE
+    # The decoded values are simply the bytes that happened to follow the signature.
+    # They carry no evidentiary weight.
+    assert result.hdd_capacity == HDD_CAPACITY
+
+
+def test_candidate_detection_does_not_imply_authenticity(tmp_path: Path) -> None:
+    # Explicitly asserts the detection/validation boundary at the API level: a
+    # returned candidate proves only that the exact 18-byte signature occurs and that
+    # 256 readable bytes follow it. It does not prove the record is genuine.
+    target = _write_image(tmp_path, _build_record(hdd_capacity=0), name="unverified.dd")
+    result = detect_master_sector(target)
+    assert result is not None  # detected...
+    # ...yet nothing here establishes authenticity; the API exposes no such claim.
+    assert not hasattr(result, "is_valid")
+    assert not hasattr(result, "authenticated")
+    assert not hasattr(result, "structurally_valid")
+    assert result.to_dict().keys() == {
+        "signature_offset",
+        "signature",
+        "hdd_capacity",
+        "system_logs_offset",
+        "system_logs_size",
+        "video_data_offset",
+        "data_block_size",
+        "total_data_blocks",
+        "hikbtree1_offset",
+        "hikbtree1_size",
+        "hikbtree2_offset",
+        "hikbtree2_size",
+        "initialization_time",
+    }
